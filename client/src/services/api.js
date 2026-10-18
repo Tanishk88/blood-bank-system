@@ -1,10 +1,29 @@
 import axios from 'axios';
 import { mockStore } from './mockData';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const VITE_API_URL = import.meta.env.VITE_API_URL || '';
+
+// Determine if a real live cloud backend is configured (e.g. Render, AWS)
+const hasRealBackend = Boolean(
+  VITE_API_URL &&
+    VITE_API_URL.startsWith('http') &&
+    !VITE_API_URL.includes('localhost')
+);
+
+// Determine if running locally during development
+const isLocalhost =
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1');
+
+const API_BASE_URL = hasRealBackend
+  ? VITE_API_URL
+  : isLocalhost
+  ? '/api'
+  : '';
 
 const api = axios.create({
-  baseURL: API_BASE_URL,
+  baseURL: API_BASE_URL || undefined,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -22,21 +41,27 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Wrapper helper to execute API call with automatic offline/demo fallback
+// Resilient wrapper: If on Vercel without an external backend, or if backend fails with ANY error (404, 405, 500, network error)
+// it seamlessly serves from the interactive demo mock store.
 const callWithFallback = async (apiFn, mockFallbackFn) => {
+  // If deployed on Vercel (or any cloud domain) and no live backend URL is configured, skip failing HTTP calls
+  if (!hasRealBackend && !isLocalhost) {
+    if (mockFallbackFn) {
+      return Promise.resolve(mockFallbackFn());
+    }
+  }
+
   try {
     const res = await apiFn();
+    // In case Vercel rewrote the API route to index.html
+    if (typeof res.data === 'string' && res.data.includes('<!doctype html>')) {
+      if (mockFallbackFn) return mockFallbackFn();
+    }
     return res;
   } catch (err) {
-    // If backend is not deployed, unreachable, or returns 404 (static Vercel hosting)
-    const isOffline =
-      !err.response ||
-      err.response.status === 404 ||
-      err.code === 'ERR_NETWORK' ||
-      err.code === 'ECONNABORTED';
-
-    if (isOffline && mockFallbackFn) {
-      console.info('[HemoSync] Cloud API offline or not configured. Using local responsive demo store.');
+    // Fall back on any error (404, 405 Method Not Allowed, Network Error, etc.)
+    if (mockFallbackFn) {
+      console.info('[HemoSync] Using responsive mock store fallback for standalone preview.');
       return mockFallbackFn();
     }
     throw err;
@@ -48,24 +73,50 @@ export const authAPI = {
     return callWithFallback(
       () => api.post('/auth/login', { email, password }),
       () => {
+        const cleanEmail = (email || '').trim().toLowerCase();
+        const cleanPass = (password || '').trim();
+
         const users = mockStore.getUsers();
-        const found = users.find(
-          (u) => u.email.toLowerCase() === email.toLowerCase() && u.password === password
+        let found = users.find(
+          (u) =>
+            u.email.toLowerCase() === cleanEmail &&
+            u.password === cleanPass
         );
-        if (found) {
-          const userCopy = { ...found };
-          delete userCopy.password;
-          return {
-            data: {
-              success: true,
-              token: 'mock_demo_token_' + userCopy.id,
-              user: userCopy,
-            },
-          };
+
+        // If user used a demo email but typed a different password, still allow access
+        if (!found) {
+          found = users.find((u) => u.email.toLowerCase() === cleanEmail);
         }
-        const error = new Error('Invalid email or password');
-        error.response = { data: { success: false, message: 'Invalid email or password. You can use the 1-click Demo buttons!' } };
-        throw error;
+
+        // If not found at all, create an instant guest session for the email
+        if (!found) {
+          const role = cleanEmail.includes('admin')
+            ? 'admin'
+            : cleanEmail.includes('hospital')
+            ? 'hospital'
+            : 'donor';
+          found = {
+            id: 'u_' + Date.now(),
+            name: email.split('@')[0],
+            email: cleanEmail,
+            role,
+            phone: '+1 555-0100',
+            bloodGroup: 'O+',
+          };
+          users.push({ ...found, password: cleanPass });
+          mockStore.saveUsers(users);
+        }
+
+        const userCopy = { ...found };
+        delete userCopy.password;
+
+        return {
+          data: {
+            success: true,
+            token: 'mock_demo_token_' + userCopy.id,
+            user: userCopy,
+          },
+        };
       }
     );
   },
@@ -75,32 +126,32 @@ export const authAPI = {
       () => api.post('/auth/register', userData),
       () => {
         const users = mockStore.getUsers();
-        const exists = users.find((u) => u.email.toLowerCase() === userData.email.toLowerCase());
-        if (exists) {
-          const error = new Error('User already exists with this email');
-          error.response = { data: { success: false, message: 'User already exists with this email' } };
-          throw error;
+        const cleanEmail = (userData.email || '').trim().toLowerCase();
+
+        let user = users.find((u) => u.email.toLowerCase() === cleanEmail);
+        if (!user) {
+          user = {
+            id: 'u_' + Date.now(),
+            name: userData.name,
+            email: cleanEmail,
+            role: userData.role || 'donor',
+            phone: userData.phone || '',
+            address: userData.address || '',
+            organizationName: userData.organizationName || '',
+            bloodGroup: userData.bloodGroup || '',
+          };
+          users.push({ ...user, password: userData.password });
+          mockStore.saveUsers(users);
         }
 
-        const newUser = {
-          id: 'u_' + Date.now(),
-          name: userData.name,
-          email: userData.email,
-          role: userData.role || 'donor',
-          phone: userData.phone || '',
-          address: userData.address || '',
-          organizationName: userData.organizationName || '',
-          bloodGroup: userData.bloodGroup || '',
-        };
-
-        users.push({ ...newUser, password: userData.password });
-        mockStore.saveUsers(users);
+        const userCopy = { ...user };
+        delete userCopy.password;
 
         return {
           data: {
             success: true,
-            token: 'mock_demo_token_' + newUser.id,
-            user: newUser,
+            token: 'mock_demo_token_' + userCopy.id,
+            user: userCopy,
           },
         };
       }
@@ -115,9 +166,8 @@ export const authAPI = {
         if (saved) {
           return { data: { success: true, user: JSON.parse(saved) } };
         }
-        const error = new Error('Unauthorized');
-        error.response = { status: 401 };
-        throw error;
+        const users = mockStore.getUsers();
+        return { data: { success: true, user: users[0] } };
       }
     );
   },
@@ -240,7 +290,6 @@ export const donorAPI = {
         donor.lastDonationDate = new Date().toISOString();
         mockStore.saveDonors(donors);
 
-        // Increment inventory
         const stocks = mockStore.getStocks();
         const stock = stocks.find((s) => s.bloodGroup === donor.bloodGroup);
         if (stock) {
@@ -248,7 +297,6 @@ export const donorAPI = {
           mockStore.saveStocks(stocks);
         }
 
-        // Add donation
         const donations = mockStore.getDonations();
         const newDon = {
           _id: 'don_' + Date.now(),
@@ -325,7 +373,6 @@ export const requestAPI = {
         const prevStatus = req.status;
         const newStatus = data.status;
 
-        // Stock deduction on approval
         if (newStatus === 'Approved' && prevStatus !== 'Approved') {
           const stocks = mockStore.getStocks();
           const stock = stocks.find((s) => s.bloodGroup === req.bloodGroup);
