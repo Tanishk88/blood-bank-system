@@ -1,0 +1,23 @@
+{
+  "name": "hemosync-blood-bank-management-system",
+  "version": "1.0.0",
+  "description": "Cloud-Native Blood Bank Management System (HemoSync)",
+  "scripts": {
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "seed": "cd server && npm run seed",
+    "build:client": "cd client && npm run build"
+  },
+  "keywords": [
+    "blood-bank",
+    "cloud",
+    "aws",
+    "gcp",
+    "docker",
+    "mern",
+    "react",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT"
+}
